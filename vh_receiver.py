@@ -20,7 +20,6 @@ def process_event(event_data):
 def respond_with_greeting():
     greeting = "Hello! How can I assist you today?"
     print(f"Greeting sent: {greeting}")
-    # Implement additional logic to send this greeting elsewhere if needed
 
 try:
     while True:
