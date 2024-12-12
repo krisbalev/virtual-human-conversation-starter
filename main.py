@@ -9,9 +9,9 @@ import json
 producer = Producer({'bootstrap.servers': 'localhost:9092'})
 
 def send_event(event_data):
-    # Serialize event_data as a JSON string
+    """Serialize event_data as a JSON string and send it to Kafka."""
     message = json.dumps(event_data)
-    producer.produce('engagement_topic', key='event', value=message)
+    producer.produce('start_conversation', key='event', value=message)
     producer.flush()
     print(f"Sent event: {message}")  # Optional: Print the sent message for debugging
 
@@ -29,10 +29,10 @@ face_cascade = cv2.CascadeClassifier(
 
 # State variables
 face_detected = False
-face_last_state = False
 audio_detected = False
-last_event_time = 0
-event_cooldown = 1  # seconds
+last_cue_type = "none"  # Tracks the last sent cue type
+last_event_time = 0  # Tracks the time of the last sent event
+debounce_time = 5  # Minimum interval (in seconds) between events
 
 try:
     while True:
@@ -68,6 +68,27 @@ try:
         # Update audio detection state
         audio_detected = audio_level > 3000  # Adjust threshold as needed
 
+        # Determine the current cue type
+        if face_detected and audio_detected:
+            current_cue_type = "both"
+        elif face_detected:
+            current_cue_type = "nonverbal"
+        elif audio_detected:
+            current_cue_type = "verbal"
+        else:
+            current_cue_type = "none"
+
+        # Send an event only if the cue type changes and debounce interval has passed
+        current_time = time.time()
+        if current_cue_type != last_cue_type and (current_time - last_event_time) >= debounce_time:
+            event_data = {
+                "start_conversation": current_cue_type != "none",
+                "cue_type": current_cue_type,
+            }
+            send_event(event_data)
+            last_cue_type = current_cue_type  # Update the last cue type
+            last_event_time = current_time  # Update the last event time
+
         # Display overlays based on detections
         if face_detected:
             cv2.putText(frame, "Face Detected!", (10, 30),
@@ -75,52 +96,6 @@ try:
         if audio_detected:
             cv2.putText(frame, "Loud Audio!", (10, 70),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-        # Prepare event data
-        current_time = time.time()
-        if current_time - last_event_time > event_cooldown:
-            event_data = {}
-            if face_detected and not face_last_state:
-                # Face just detected
-                event_data["start_conversation"] = True
-                if audio_detected:
-                    event_data["cue_type"] = "both"
-                else:
-                    event_data["cue_type"] = "nonverbal"
-                event_data["cues"] = []
-                send_event(event_data)
-                last_event_time = current_time
-            elif face_detected and audio_detected:
-                # Both cues detected
-                event_data["start_conversation"] = True
-                event_data["cue_type"] = "both"
-                event_data["cues"] = []
-                send_event(event_data)
-                last_event_time = current_time
-            elif face_detected and not audio_detected:
-                # Only face detected
-                event_data["start_conversation"] = True
-                event_data["cue_type"] = "nonverbal"
-                event_data["cues"] = []
-                send_event(event_data)
-                last_event_time = current_time
-            elif not face_detected and audio_detected:
-                # Only audio detected
-                event_data["start_conversation"] = True
-                event_data["cue_type"] = "verbal"
-                event_data["cues"] = []
-                send_event(event_data)
-                last_event_time = current_time
-            elif not face_detected and face_last_state:
-                # Face lost
-                event_data["start_conversation"] = False
-                event_data["cue_type"] = "none"
-                event_data["cues"] = []
-                send_event(event_data)
-                last_event_time = current_time
-
-        # Update last face detection state
-        face_last_state = face_detected
 
         # Show the video feed with overlays
         cv2.imshow("Engagement Detection", frame)

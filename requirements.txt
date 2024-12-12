@@ -1,3 +1,5 @@
 opencv-python
 pyaudio
 confluent-kafka
+pygame
+pyttsx3
