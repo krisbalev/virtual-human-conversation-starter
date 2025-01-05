@@ -1,67 +1,70 @@
-# main.py
-
 import json
 import time
 from confluent_kafka import Producer
-
 from eye_nod_detection import EyeNodDetector
+from voice_detection import VoiceDetector
 
 def main():
-    # ------------- Confluent Kafka Producer Setup -------------
+    # Kafka Producer Setup
     conf = {
-        'bootstrap.servers': 'localhost:9092',  # or your Docker host:port
+        'bootstrap.servers': 'localhost:9092',
     }
     producer = Producer(conf)
 
     def delivery_report(err, msg):
-        """Called once for each message produced to indicate delivery result."""
         if err is not None:
             print(f"Message delivery failed: {err}")
         else:
-            # Decode the message value from bytes to string (assuming UTF-8)
             payload = msg.value().decode('utf-8')
-            # Decode the key if present
             key = msg.key().decode('utf-8') if msg.key() else "None"
-            print(f"Message delivered to {msg.topic()} [{msg.partition()}] "
-                  f"- key: {key}, value: {payload}")
+            print(f"Message delivered to {msg.topic()} [{msg.partition()}] - key: {key}, value: {payload}")
 
     topic_name = "start_conversation"
 
-    # ------------- Initialize the Detector -------------
+    # Initialize Detectors
     detector = EyeNodDetector(
-        camera_index=0,       # change if you have multiple cameras
+        camera_index=0,
         nod_threshold=15.0,
         cooldown=1.0,
         alpha=0.3,
         iris_center_threshold_ratio=0.25,
         max_yaw_for_gaze=50
     )
+    voice_detector = VoiceDetector(model_path="vosk_model/vosk-model-en-us-0.22")
 
-    # ------------- State Variables -------------
+    # State Variables
     conversation_active = False
-
-    eye_contact_session_start = 0.0
-    no_eye_contact_start = 0.0
-
-    # Track whether the user had eye contact on the previous frame
     eye_contact_prev_frame = False
+    eye_contact_start_time = 0.0
+    no_eye_contact_start_time = 0.0
+    last_nod_time = 0.0
 
     print("Starting. Press ESC to stop...")
 
     try:
         while True:
+            # Get cues from EyeNodDetector
             nod_detected, eye_contact, should_quit = detector.get_cues_and_show()
 
-            if not conversation_active:
-                # We're currently not in a conversation
+            # Get speech from VoiceDetector
+            voice_command = voice_detector.detect_speech()
 
+            current_time = time.time()
+
+            if not conversation_active:
                 if eye_contact:
-                    # 1) Eye contact + nod => instant start
-                    if nod_detected:
+                    # Start eye contact timer if it's the first frame
+                    if not eye_contact_prev_frame:
+                        eye_contact_start_time = current_time
+                    
+                    # Condition 1: Eye contact + nod + no speech for 3 seconds
+                    if nod_detected and not voice_command:
+                        last_nod_time = current_time
+                    elif last_nod_time > 0 and (current_time - last_nod_time) >= 3.0:
                         payload = {
                             "start_conversation": True,
                             "type": "NONVERBAL",
-                            "cues": ["eye_contact", "head_nod"]  # both cues
+                            "cues": ["eye_contact", "head_nod"]
                         }
                         producer.produce(
                             topic=topic_name,
@@ -69,70 +72,60 @@ def main():
                             value=json.dumps(payload),
                             callback=delivery_report
                         )
+                        print("Triggered conversation with nod and no speech for 3 seconds.")
                         conversation_active = True
 
-                    else:
-                        # 2) Only eye contact => wait 5 seconds
-                        if not eye_contact_prev_frame:
-                            # Just started eye contact, record time
-                            eye_contact_session_start = time.time()
-                        else:
-                            # Already in eye contact
-                            if (time.time() - eye_contact_session_start) >= 5.0:
-                                # Start conversation after 5s
-                                payload = {
-                                    "start_conversation": True,
-                                    "type": "NONVERBAL",
-                                    "cues": ["eye_contact"]  # only eye contact
-                                }
-                                producer.produce(
-                                    topic=topic_name,
-                                    key="start_conversation",
-                                    value=json.dumps(payload),
-                                    callback=delivery_report
-                                )
-                                conversation_active = True
+                    # Condition 2: Eye contact + speech
+                    elif voice_command:
+                        payload = {
+                            "start_conversation": True,
+                            "type": "MULTIMODAL",
+                            "cues": ["eye_contact", "voice_command"],
+                            "spoken_text": voice_command
+                        }
+                        producer.produce(
+                            topic=topic_name,
+                            key="start_conversation",
+                            value=json.dumps(payload),
+                            callback=delivery_report
+                        )
+                        print(f"Triggered conversation with speech: {voice_command}")
+                        conversation_active = True
+
+                    # Condition 3: Eye contact sustained for 5 seconds
+                    elif (current_time - eye_contact_start_time) >= 5.0:
+                        payload = {
+                            "start_conversation": True,
+                            "type": "NONVERBAL",
+                            "cues": ["eye_contact"]
+                        }
+                        producer.produce(
+                            topic=topic_name,
+                            key="start_conversation",
+                            value=json.dumps(payload),
+                            callback=delivery_report
+                        )
+                        print("Triggered conversation with sustained eye contact for 5 seconds.")
+                        conversation_active = True
+
                 else:
-                    # No eye contact => reset the timer
-                    eye_contact_session_start = 0.0
+                    # Reset timers if no eye contact
+                    eye_contact_start_time = 0.0
+                    last_nod_time = 0.0
 
             else:
-                # conversation_active == True
-                # Ignore nods entirely
-
-                if eye_contact:
-                    # If user re-establishes eye contact before 10 seconds, do nothing
-                    pass
-                else:
-                    # No eye contact this frame
-                    # If we JUST broke eye contact, record the time
+                # Handle conversation end
+                if not eye_contact:
                     if eye_contact_prev_frame:
-                        no_eye_contact_start = time.time()
-                    else:
-                        # We've been out of eye contact for some time
-                        # check if it's >= 10 seconds
-                        if (time.time() - no_eye_contact_start) >= 10.0:
-                            print("conversation ended")
-                            conversation_active = False
-                            # If you also want to send a Kafka message for conversation ended, do:
-                            # payload = {
-                            #     "conversation_ended": True,
-                            #     "timestamp": time.time()
-                            # }
-                            # producer.produce(
-                            #     topic=topic_name,
-                            #     key="conversation_ended",
-                            #     value=json.dumps(payload),
-                            #     callback=delivery_report
-                            # )
+                        no_eye_contact_start_time = current_time
+                    elif (current_time - no_eye_contact_start_time) >= 10.0:
+                        print("Conversation ended due to loss of eye contact.")
+                        conversation_active = False
 
-            # Update previous eye contact
+            # Update previous frame
             eye_contact_prev_frame = eye_contact
-
-            # Let the producer handle events
             producer.poll(0)
 
-            # Check for ESC
             if should_quit:
                 break
 
@@ -142,6 +135,7 @@ def main():
         print("\nUser interrupted with Ctrl+C.")
     finally:
         detector.release()
+        voice_detector.stop()
         producer.flush()
         print("Shutting down.")
 
