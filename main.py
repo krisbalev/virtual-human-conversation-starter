@@ -1,116 +1,143 @@
-import cv2
-import pyaudio
-import numpy as np
+import json
 import time
 from confluent_kafka import Producer
-import json
+from eye_nod_detection import EyeNodDetector
+from voice_detection import VoiceDetector
 
-# Initialize Kafka producer
-producer = Producer({'bootstrap.servers': 'localhost:9092'})
+def main():
+    # Kafka Producer Setup
+    conf = {
+        'bootstrap.servers': 'localhost:9092',
+    }
+    producer = Producer(conf)
 
-def send_event(event_data):
-    """Serialize event_data as a JSON string and send it to Kafka."""
-    message = json.dumps(event_data)
-    producer.produce('start_conversation', key='event', value=message)
-    producer.flush()
-    print(f"Sent event: {message}")  # Optional: Print the sent message for debugging
-
-# Initialize video capture (webcam)
-cap = cv2.VideoCapture(0)
-
-# Initialize audio capture
-audio = pyaudio.PyAudio()
-stream = audio.open(format=pyaudio.paInt16, channels=1, rate=44100,
-                    input=True, frames_per_buffer=1024)
-
-# Load pre-trained face detection model
-face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-
-# State variables
-face_detected = False
-audio_detected = False
-last_cue_type = "none"  # Tracks the last sent cue type
-last_event_time = 0  # Tracks the time of the last sent event
-debounce_time = 5  # Minimum interval (in seconds) between events
-
-try:
-    while True:
-        # Capture video frame
-        ret, frame = cap.read()
-        if not ret:
-            print("Error: Could not read from webcam.")
-            break
-
-        # Convert video frame to grayscale for face detection
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # Detect faces in the frame
-        faces = face_cascade.detectMultiScale(
-            gray_frame, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-
-        # Update face detection state
-        face_detected = len(faces) > 0
-
-        # Draw rectangles around detected faces
-        for (x, y, w, h) in faces:
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
-
-        # Capture audio chunk
-        try:
-            audio_data = np.frombuffer(stream.read(
-                1024, exception_on_overflow=False), dtype=np.int16)
-            audio_level = np.max(audio_data)
-        except Exception as e:
-            print(f"Audio read error: {e}")
-            audio_level = 0
-
-        # Update audio detection state
-        audio_detected = audio_level > 3000  # Adjust threshold as needed
-
-        # Determine the current cue type
-        if face_detected and audio_detected:
-            current_cue_type = "both"
-        elif face_detected:
-            current_cue_type = "nonverbal"
-        elif audio_detected:
-            current_cue_type = "verbal"
+    def delivery_report(err, msg):
+        if err is not None:
+            print(f"Message delivery failed: {err}")
         else:
-            current_cue_type = "none"
+            payload = msg.value().decode('utf-8')
+            key = msg.key().decode('utf-8') if msg.key() else "None"
+            print(f"Message delivered to {msg.topic()} [{msg.partition()}] - key: {key}, value: {payload}")
 
-        # Send an event only if the cue type changes and debounce interval has passed
-        current_time = time.time()
-        if current_cue_type != last_cue_type and (current_time - last_event_time) >= debounce_time:
-            event_data = {
-                "start_conversation": current_cue_type != "none",
-                "cue_type": current_cue_type,
-            }
-            send_event(event_data)
-            last_cue_type = current_cue_type  # Update the last cue type
-            last_event_time = current_time  # Update the last event time
+    topic_name = "start_conversation"
 
-        # Display overlays based on detections
-        if face_detected:
-            cv2.putText(frame, "Face Detected!", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        if audio_detected:
-            cv2.putText(frame, "Loud Audio!", (10, 70),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+    # Initialize Detectors
+    detector = EyeNodDetector(
+        camera_index=0,
+        nod_threshold=15.0,
+        cooldown=1.0,
+        alpha=0.3,
+        iris_center_threshold_ratio=0.25,
+        max_yaw_for_gaze=50
+    )
+    voice_detector = VoiceDetector(model_path="vosk_model/vosk-model-en-us-0.22")
 
-        # Show the video feed with overlays
-        cv2.imshow("Engagement Detection", frame)
+    # State Variables
+    conversation_active = False
+    eye_contact_prev_frame = False
+    eye_contact_start_time = 0.0
+    no_eye_contact_start_time = 0.0
+    last_nod_time = 0.0
 
-        # Exit on pressing 'q'
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+    print("Starting. Press ESC to stop...")
 
-except KeyboardInterrupt:
-    print("Interrupted by user.")
+    try:
+        while True:
+            # Get cues from EyeNodDetector
+            nod_detected, eye_contact, should_quit = detector.get_cues_and_show()
 
-finally:
-    # Cleanup
-    cap.release()
-    cv2.destroyAllWindows()
-    stream.stop_stream()
-    stream.close()
-    audio.terminate()
+            # Get speech from VoiceDetector
+            voice_command = voice_detector.detect_speech()
+
+            current_time = time.time()
+
+            if not conversation_active:
+                if eye_contact:
+                    # Start eye contact timer if it's the first frame
+                    if not eye_contact_prev_frame:
+                        eye_contact_start_time = current_time
+                    
+                    # Condition 1: Eye contact + nod + no speech for 3 seconds
+                    if nod_detected and not voice_command:
+                        last_nod_time = current_time
+                    elif last_nod_time > 0 and (current_time - last_nod_time) >= 3.0:
+                        payload = {
+                            "start_conversation": True,
+                            "type": "NONVERBAL",
+                            "cues": ["eye_contact", "head_nod"]
+                        }
+                        producer.produce(
+                            topic=topic_name,
+                            key="start_conversation",
+                            value=json.dumps(payload),
+                            callback=delivery_report
+                        )
+                        print("Triggered conversation with nod and no speech for 3 seconds.")
+                        conversation_active = True
+
+                    # Condition 2: Eye contact + speech
+                    elif voice_command:
+                        payload = {
+                            "start_conversation": True,
+                            "type": "MULTIMODAL",
+                            "cues": ["eye_contact", "voice_command"],
+                            "spoken_text": voice_command
+                        }
+                        producer.produce(
+                            topic=topic_name,
+                            key="start_conversation",
+                            value=json.dumps(payload),
+                            callback=delivery_report
+                        )
+                        print(f"Triggered conversation with speech: {voice_command}")
+                        conversation_active = True
+
+                    # Condition 3: Eye contact sustained for 5 seconds
+                    elif (current_time - eye_contact_start_time) >= 5.0:
+                        payload = {
+                            "start_conversation": True,
+                            "type": "NONVERBAL",
+                            "cues": ["eye_contact"]
+                        }
+                        producer.produce(
+                            topic=topic_name,
+                            key="start_conversation",
+                            value=json.dumps(payload),
+                            callback=delivery_report
+                        )
+                        print("Triggered conversation with sustained eye contact for 5 seconds.")
+                        conversation_active = True
+
+                else:
+                    # Reset timers if no eye contact
+                    eye_contact_start_time = 0.0
+                    last_nod_time = 0.0
+
+            else:
+                # Handle conversation end
+                if not eye_contact:
+                    if eye_contact_prev_frame:
+                        no_eye_contact_start_time = current_time
+                    elif (current_time - no_eye_contact_start_time) >= 10.0:
+                        print("Conversation ended due to loss of eye contact.")
+                        conversation_active = False
+
+            # Update previous frame
+            eye_contact_prev_frame = eye_contact
+            producer.poll(0)
+
+            if should_quit:
+                break
+
+            time.sleep(0.01)
+
+    except KeyboardInterrupt:
+        print("\nUser interrupted with Ctrl+C.")
+    finally:
+        detector.release()
+        voice_detector.stop()
+        producer.flush()
+        print("Shutting down.")
+
+if __name__ == "__main__":
+    main()

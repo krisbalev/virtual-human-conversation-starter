@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>D-ID Real-Time Avatar</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        text-align: center;
+        margin: 20px;
+      }
+      #agent-container {
+        width: 640px;
+        height: 480px;
+        margin: 20px auto;
+        border: 1px solid #ccc;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>D-ID Real-Time Interactive Avatar</h1>
+
+    <!-- Container for the D-ID agent -->
+    <div id="agent-container"></div>
+
+    <!-- Fetch agent details through the proxy server -->
+    <script>
+      fetch("http://localhost:5000/proxy/agent?agent_id=agt_RQQXGaEr")
+        .then((response) => response.json())
+        .then((data) => {
+          console.log("Agent data:", data);
+        })
+        .catch((error) => {
+          console.error("Error fetching agent:", error);
+        });
+    </script>
+
+    <!-- D-ID Embedded Agent Script -->
+
+    <script
+      type="module"
+      src="https://agent.d-id.com/v1/index.js"
+      data-name="did-agent"
+      data-mode="fabio"
+      data-client-key="Z29vZ2xlLW9hdXRoMnwxMTcwOTc1NzA1MjIxODAyNjYyMzY6OHlHVEhFVVFPRXkzd1BJc3lvZkdX"
+      data-agent-id="agt_RQQXGaEr"
+      data-monitor="true"
+    ></script>
+
+    <!-- WebSocket Handling Script -->
+    <script>
+      const socket = new WebSocket("ws://localhost:8000");
+
+      socket.onopen = function () {
+        console.log("Connected to WebSocket server");
+      };
+
+      socket.onmessage = function (event) {
+        const message = JSON.parse(event.data);
+        console.log("Received from backend:", message);
+
+        if (message.type === "cues") {
+          const agent = document.querySelector("[data-name='did-agent']");
+          agent.start({ input: message.cues.join(", ") });
+        } else if (message.type === "text") {
+          const agent = document.querySelector("[data-name='did-agent']");
+          agent.start({ input: message.text });
+        }
+      };
+
+      socket.onerror = function (error) {
+        console.error("WebSocket Error:", error);
+      };
+
+      socket.onclose = function () {
+        console.log("WebSocket connection closed");
+      };
+    </script>
+  </body>
+</html>

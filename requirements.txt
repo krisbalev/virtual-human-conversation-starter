@@ -3,3 +3,9 @@ pyaudio
 confluent-kafka
 pygame
 pyttsx3
+mediapipe
+requests
+flask
+python-dotenv
+flask-cors
+websockets

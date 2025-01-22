@@ -3,6 +3,10 @@ import pyttsx3
 import threading
 from confluent_kafka import Consumer, KafkaException
 import json
+import os
+
+# Get the base directory for the assets
+base_dir = os.path.join(os.path.dirname(__file__), "../assets/images")
 
 # Pygame setup
 pygame.init()
@@ -11,8 +15,8 @@ pygame.display.set_caption("Virtual Human")
 clock = pygame.time.Clock()
 
 # Load images
-human_idle = pygame.image.load("human_idle.png")
-human_speaking = pygame.image.load("human_speaking.png")
+human_idle = pygame.image.load(os.path.join(base_dir, "human_idle.png"))
+human_speaking = pygame.image.load(os.path.join(base_dir, "human_speaking.png"))
 
 # Resize images for consistency
 human_idle = pygame.transform.scale(human_idle, (400, 400))
